@@ -205,6 +205,72 @@ aciertos_modelo_con_residual = accuracy_score(
     fallas_con_residual_predichas,
 )
 
+# Esta guía ofrece orientaciones educativas; no controla equipos eléctricos.
+# Las maniobras y decisiones reales corresponden a personal autorizado y a los
+# procedimientos de seguridad y protección aprobados para la instalación.
+acciones_recomendadas = {
+    "Sin falla": (
+        "Operación normal; mantener el monitoreo."
+    ),
+    "LG: fase A a tierra": (
+        "Verificar la actuación de la protección de sobrecorriente de tierra "
+        "(50N/51N) e inspeccionar el aislamiento de la fase A: aisladores, "
+        "contaminación y vegetación."
+    ),
+    "LL: fases B-C": (
+        "Verificar la actuación de la protección de sobrecorriente de fase "
+        "(50/51) y revisar si hubo acercamiento o contacto entre los conductores B y C."
+    ),
+    "LLG: fases A-B a tierra": (
+        "Verificar las protecciones de fase y de tierra; inspeccionar las fases "
+        "A y B y el sistema de puesta a tierra."
+    ),
+    "LLL: trifásica": (
+        "Es una falla potencialmente asociada a una corriente de cortocircuito "
+        "elevada; confirmar la apertura del interruptor y no reconectar sin "
+        "inspeccionar la línea."
+    ),
+    "LLLG: trifásica a tierra": (
+        "Como para una falla trifásica, confirmar la apertura del interruptor y "
+        "no reconectar sin inspeccionar la línea. Además, revisar la malla de "
+        "tierra y confirmar que no queden tierras temporales de mantenimiento."
+    ),
+}
+
+
+def recomendar_falla(ia, ib, ic, va, vb, vc):
+    """Predice una falla a partir de seis mediciones y devuelve una guía educativa."""
+    # La corriente residual es la suma de las tres corrientes de fase.
+    corriente_residual = ia + ib + ic
+
+    # Organizamos las siete mediciones en una fila con los mismos nombres y
+    # el mismo orden usados al entrenar el modelo.
+    nueva_medicion = pd.DataFrame(
+        [[ia, ib, ic, va, vb, vc, corriente_residual]],
+        columns=["Ia", "Ib", "Ic", "Va", "Vb", "Vc", "Ir"],
+    )
+
+    # El KNN compara esta fila con los ejemplos y elige una de las seis clases.
+    falla_predicha = modelo_con_residual.predict(nueva_medicion)[0]
+
+    # Contamos cuántos de los cinco vecinos votaron por la clase predicha.
+    # Este conteo muestra acuerdo entre vecinos, pero no garantiza que la predicción sea correcta.
+    clasificador_knn = modelo_con_residual.named_steps["kneighborsclassifier"]
+    votos_por_clase = modelo_con_residual.predict_proba(nueva_medicion)[0]
+    posicion_predicha = clasificador_knn.classes_ == falla_predicha
+    votos_de_la_prediccion = int(
+        round(votos_por_clase[posicion_predicha][0] * clasificador_knn.n_neighbors)
+    )
+
+    # Devolvemos la predicción, los votos, la corriente calculada y la guía.
+    return {
+        "corriente_residual": corriente_residual,
+        "falla_predicha": falla_predicha,
+        "votos": votos_de_la_prediccion,
+        "accion_recomendada": acciones_recomendadas[falla_predicha],
+    }
+
+
 # La tabla compara tres experimentos: el original, el de categorías agrupadas
 # y el original de seis categorías con una séptima medición.
 tabla_comparacion = pd.DataFrame(
@@ -229,3 +295,47 @@ tabla_comparacion["Aciertos"] = tabla_comparacion["Aciertos"].map(
 
 print("\nComparación de los tres experimentos:")
 print(tabla_comparacion.to_string(index=False))
+
+# Separamos las mediciones de prueba junto con sus etiquetas verdaderas.
+# Así los ejemplos no son las mismas filas que el modelo usó para aprender.
+ejemplos_de_prueba = mediciones_prueba.copy()
+ejemplos_de_prueba["falla_real"] = fallas_reales
+
+# Escogemos una medición de prueba de cada una de las seis clases.
+seis_ejemplos = ejemplos_de_prueba.groupby("falla_real", sort=True).head(1)
+
+# Para cada ejemplo, predecimos la falla y guardamos el resultado y la recomendación.
+resultados_ejemplos = []
+for _, ejemplo in seis_ejemplos.iterrows():
+    resultado = recomendar_falla(
+        ejemplo["Ia"],
+        ejemplo["Ib"],
+        ejemplo["Ic"],
+        ejemplo["Va"],
+        ejemplo["Vb"],
+        ejemplo["Vc"],
+    )
+    resultados_ejemplos.append(
+        {
+            "Falla real": ejemplo["falla_real"],
+            "Falla predicha": resultado["falla_predicha"],
+            "¿Acertó?": "Sí" if ejemplo["falla_real"] == resultado["falla_predicha"] else "No",
+            "Votos de 5": f"{resultado['votos']}/5",
+            "Acción recomendada (orientativa)": resultado["accion_recomendada"],
+            "Advertencia": (
+                "Baja confianza: confirmar con los registros del relé de protección."
+                if resultado["votos"] <= 3
+                else "Sin advertencia por votos."
+            ),
+        }
+    )
+
+# Mostramos en una tabla las seis comparaciones con los votos de los vecinos.
+tabla_ejemplos = pd.DataFrame(resultados_ejemplos)
+print("\nUna medición de prueba por tipo de falla:")
+print(tabla_ejemplos.to_string(index=False))
+print(
+    "\nAviso: los votos indican cuántos vecinos coincidieron, no una probabilidad "
+    "calibrada ni una garantía. Las recomendaciones son orientativas; confirmar "
+    "diagnósticos y maniobras con personal autorizado y procedimientos aprobados."
+)
